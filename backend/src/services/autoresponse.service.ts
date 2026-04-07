@@ -1,22 +1,94 @@
 import { prisma } from './database';
 import { whatsappService } from './whatsapp.service';
 
+// --- Helpers para Fuzzy Matching ---
+function removeAccents(str: string): string {
+    return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9 ]/g, '');
+}
+
+function levenshtein(a: string, b: string): number {
+    if (a.length === 0) return b.length;
+    if (b.length === 0) return a.length;
+    const matrix = [];
+    for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+    for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+    for (let i = 1; i <= b.length; i++) {
+        for (let j = 1; j <= a.length; j++) {
+            if (b.charAt(i - 1) == a.charAt(j - 1)) {
+                matrix[i][j] = matrix[i - 1][j - 1];
+            } else {
+                matrix[i][j] = Math.min(
+                    matrix[i - 1][j - 1] + 1, // substitution
+                    matrix[i][j - 1] + 1,     // insertion
+                    matrix[i - 1][j] + 1      // deletion
+                );
+            }
+        }
+    }
+    return matrix[b.length][a.length];
+}
+
+export function fuzzyMatchPhrase(message: string, triggerPhrase: string): boolean {
+    const msgWords = removeAccents(message).split(/\s+/).filter(w => w.length > 0);
+    const triggerWords = removeAccents(triggerPhrase).split(/\s+/).filter(w => w.length > 0);
+    
+    if (triggerWords.length === 0) return false;
+    if (msgWords.length < triggerWords.length) return false;
+
+    // Sliding window over user message
+    for (let i = 0; i <= msgWords.length - triggerWords.length; i++) {
+        let matchCount = 0;
+        for (let j = 0; j < triggerWords.length; j++) {
+            const mWord = msgWords[i + j];
+            const tWord = triggerWords[j];
+            
+            const allowedTypos = tWord.length <= 3 ? 0 : (tWord.length <= 6 ? 1 : 2);
+            
+            if (levenshtein(mWord, tWord) <= allowedTypos) {
+                matchCount++;
+            } else {
+                break;
+            }
+        }
+        if (matchCount === triggerWords.length) {
+            return true;
+        }
+    }
+    return false;
+}
+// -----------------------------------
+
 interface AutoResponseRule {
   id: string;
-  trigger: string; // palavras-chave ou regex
+  trigger: string;
   response: string;
+  tag?: string; // NOVO: Etiqueta opcional para aplicar ao contato
   type: 'text' | 'template';
   enabled: boolean;
-  delay?: number; // ms antes de responder
+  delay?: number;
 }
 
 class AutoResponseService {
   private rules: AutoResponseRule[] = [];
   private isProcessing = false;
+  private isEnabled = false; // DESATIVADO por padrão conforme solicitado
+  private recentlyGreeted: Map<string, number> = new Map();
+  private MENU_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6 horas
+
+  // Memória para o Follow-Up de Inatividade (5 minutos)
+  private lastBotResponseTime: Map<string, number> = new Map();
+  private lastUserMessageTime: Map<string, number> = new Map();
+  private lastManualMessageTime: Map<string, number> = new Map(); // NOVO: Pausa manual
+  private followUpSent: Map<string, boolean> = new Map();
+  private contactPhones: Map<string, string> = new Map();
+  private MANUAL_PAUSE_MS = 10 * 60 * 1000; // 10 minutos de pausa
 
   async initialize() {
     console.log('[AutoResponse] Inicializando serviço de autorresposta...');
     await this.loadRules();
+    
+    // Varredura de inatividade a cada 1 minuto (60.000 ms)
+    setInterval(() => this.checkInactivity(), 60000);
   }
 
   private async loadRules() {
@@ -25,12 +97,58 @@ class AutoResponseService {
       const templates = await prisma.messageTemplate.findMany({
         where: { active: true }
       });
-
-      // Aqui você pode carregar regras de autorresponse do banco
-      // Por enquanto, vamos usar templates como base
       console.log(`[AutoResponse] ${templates.length} templates carregados`);
     } catch (err) {
       console.error('[AutoResponse] Erro ao carregar regras:', err);
+    }
+  }
+
+  private async checkInactivity() {
+    const now = Date.now();
+    const FIVE_MINUTES_MS = 5 * 60 * 1000;
+
+    for (const [contactId, botTime] of this.lastBotResponseTime.entries()) {
+      if (!this.isEnabled) continue; // Pula se automação global estiver desativada
+
+      const userTime = this.lastUserMessageTime.get(contactId) || 0;
+      
+      // Se não enviou follow up ainda, e robô falou por último, e passou de 5 mins
+      const lastManual = this.lastManualMessageTime.get(contactId) || 0;
+      const isPaused = (now - lastManual) < this.MANUAL_PAUSE_MS;
+
+      if (!isPaused && !this.followUpSent.get(contactId) && botTime > userTime && (now - botTime) >= FIVE_MINUTES_MS) {
+         
+         const phone = this.contactPhones.get(contactId);
+         if (!phone) continue;
+
+         // Previne enviar multiplas vezes no mesmo loop
+         this.followUpSent.set(contactId, true);
+         
+         try {
+           const contact = await prisma.contact.findUnique({ where: { id: contactId } });
+           if (!contact) continue;
+           
+           let followUpMsg = `Oi {{nome}}, percebi que você parou de responder. Posso ajudar em mais alguma coisa ou tirar mais alguma dúvida?`;
+           
+           const allTemplates = await prisma.messageTemplate.findMany({ where: { active: true } });
+           const customTemplate = allTemplates.find(t => t.name.trim().toLowerCase() === 'retorno' || t.name.trim().toLowerCase() === 'inatividade');
+           if (customTemplate && customTemplate.body) {
+             followUpMsg = customTemplate.body;
+           }
+
+           const formatted = this.substituteVariables(followUpMsg, contact);
+           console.log(`[AutoResponse] ⏰ Disparando follow-up de 5 minutos para ${contact.name}`);
+           await whatsappService.sendText(phone, formatted);
+           
+           // O salvamento no histórico agora é feito centralmente pelo whatsapp.service.ts (message_create)
+           
+           // Atualiza timer do bot pra engatar o relógio novamente se preciso
+           this.lastBotResponseTime.set(contactId, Date.now());
+           
+         } catch(e) {
+            console.error('[AutoResponse] Erro no checkInactivity:', e);
+         }
+      }
     }
   }
 
@@ -39,7 +157,24 @@ class AutoResponseService {
    */
   async processIncomingMessage(contactId: string, phone: string, message: string): Promise<boolean> {
     try {
+      if (!this.isEnabled) {
+        console.log(`[AutoResponse] ℹ Automação DESATIVADA globalmente. Ignorando mensagem de ${phone}`);
+        return false;
+      }
+
       console.log(`[AutoResponse] Processando mensagem: "${message}" de ${phone}`);
+      
+      // -- NOVO: Registra iteração do usuário --
+      this.lastUserMessageTime.set(contactId, Date.now());
+      this.followUpSent.set(contactId, false);
+      this.contactPhones.set(contactId, phone);
+
+      // -- NOVO: Verifica se o robô está em modo de "Pausa Manual" (Intervenção humana)
+      const lastManual = this.lastManualMessageTime.get(contactId) || 0;
+      if (Date.now() - lastManual < this.MANUAL_PAUSE_MS) {
+        console.log(`[AutoResponse] 🛑 Robô em SILÊNCIO para ${phone} (Intervenção manual nas últimas 1h)`);
+        return false;
+      }
       
       if (this.isProcessing) {
         console.log('[AutoResponse] ⊘ Já está processando outra mensagem');
@@ -64,12 +199,50 @@ class AutoResponseService {
 
       // Procura por trigger que combina
       const rule = await this.findMatchingRule(normalizedMsg);
-      if (!rule) {
-        console.log(`[AutoResponse] ℹ Nenhuma regra combinou para: "${message}"`);
-        return false;
-      }
-
       this.isProcessing = true;
+
+      if (!rule) {
+        // Fallback: Menu de Boas Vindas
+        const now = Date.now();
+        const lastGreet = this.recentlyGreeted.get(contact.id) || 0;
+        
+        // Se conversou recetemente (últimas 6 horas), não mandar o menu
+        if (now - lastGreet < this.MENU_COOLDOWN_MS) {
+           console.log(`[AutoResponse] ℹ Nenhuma regra e Menu em Cooldown para: ${contact.name}`);
+           this.isProcessing = false;
+           return false;
+        }
+
+        // Se nunca conversou ou já passou as 6h, enviamos o Menu
+        let menuMsg = `Olá, seja bem-vindo(a) ao nosso atendimento! {{nome}}, selecione algumas opções abaixo para você tirar suas dúvidas:\n\n1️⃣ Valor do curso\n2️⃣ Suporte\n3️⃣ Segunda via\n\nResponda apenas com o número desejado.`;
+        
+        // Busca se existe um template customizado pelo usuário para substituir o menu
+        const customMenu = await prisma.messageTemplate.findFirst({
+            where: { active: true }
+        });
+        // Como o SQLite não suporta CI nativo facilmente, buscamos todos ou validamos no JS
+        const allTemplates = await prisma.messageTemplate.findMany({ where: { active: true } });
+        const menuTemplate = allTemplates.find(t => t.name.trim().toLowerCase() === 'menu de opções' || t.name.trim().toLowerCase() === 'menu principal');
+        
+        if (menuTemplate && menuTemplate.body) {
+            menuMsg = menuTemplate.body;
+        }
+
+        const formattedMenu = this.substituteVariables(menuMsg, contact);
+        
+        console.log(`[AutoResponse] 📤 Enviando Menu para ${contact.name}`);
+        await whatsappService.sendText(phone, formattedMenu);
+        this.recentlyGreeted.set(contact.id, now);
+        this.lastBotResponseTime.set(contactId, Date.now());
+        
+        // O salvamento no histórico agora é feito centralmente pelo whatsapp.service.ts (message_create)
+        
+        this.isProcessing = false;
+        return true;
+      }
+      
+      // Se encontrou alguma regra específica (como "1" ou "boa tarde"), atualiza a memória de saudação
+      this.recentlyGreeted.set(contact.id, Date.now());
 
       // Aguarda delay se configurado
       if (rule.delay) {
@@ -81,18 +254,26 @@ class AutoResponseService {
       const formattedResponse = this.substituteVariables(rule.response, contact);
       console.log(`[AutoResponse] 📤 Enviando resposta para ${contact.name}: "${formattedResponse}"`);
       await whatsappService.sendText(phone, formattedResponse);
+      this.lastBotResponseTime.set(contactId, Date.now());
 
-      // Log da autorresposta
-      await prisma.message.create({
-        data: {
-          contactId,
-          direction: 'outbound',
-          type: 'text',
-          body: formattedResponse,
-          status: 'sent',
+      // -- NOVO: Aplica etiqueta automática se houver --
+      if (rule.tag) {
+        try {
+          const currentTags = JSON.parse(contact.tags || '[]');
+          if (Array.isArray(currentTags) && !currentTags.includes(rule.tag)) {
+            const updatedTags = [...currentTags, rule.tag];
+            await prisma.contact.update({
+              where: { id: contactId },
+              data: { tags: JSON.stringify(updatedTags) }
+            });
+            console.log(`[AutoResponse] 🏷️ Etiqueta "${rule.tag}" aplicada ao contato ${contact.name}`);
+          }
+        } catch (e) {
+          console.error('[AutoResponse] Erro ao aplicar etiqueta:', e);
         }
-      });
+      }
 
+      // Log da autorresposta (removido para evitar duplicidade, message_create cuidará disso)
       console.log(`[AutoResponse] ✅ Resposta enviada para ${contact.name}`);
       return true;
 
@@ -115,11 +296,11 @@ class AutoResponseService {
       });
 
       for (const template of templates) {
-        // Usa o nome do template como palavras-chave
-        const keywords = template.name.toLowerCase().split(/\s+/);
+        // Usa o nome do template inteiro como frase-chave. Permite vírgulas para múltiplas frases.
+        const triggerPhrases = template.name.toLowerCase().split(',').map(s => s.trim());
         
-        // Se a mensagem contém alguma palavra-chave do template, usa ele
-        if (keywords.some(kw => message.includes(kw))) {
+        // Se a mensagem contém alguma frase inteira do template, de forma aproximada (fuzzy e sem acento)
+        if (triggerPhrases.some(phrase => phrase.length > 0 && fuzzyMatchPhrase(message, phrase))) {
           console.log(`[AutoResponse] Match encontrado: "${template.name}"`);
           return {
             id: template.id,
@@ -130,20 +311,43 @@ class AutoResponseService {
             delay: 500
           };
         }
+
+        // NOVO: Verifica as 'Ações Rápidas' filhas dentro de variables
+        try {
+          const parsedVars = JSON.parse(template.variables || '[]');
+          if (Array.isArray(parsedVars)) {
+            for (const childOption of parsedVars) {
+               if (!childOption.trigger || !childOption.response) continue;
+               const childTriggers = childOption.trigger.toLowerCase().split(',').map((s: string) => s.trim());
+               if (childTriggers.some((phrase: string) => phrase.length > 0 && fuzzyMatchPhrase(message, phrase))) {
+                 console.log(`[AutoResponse] Match encontrado em Ação Aninhada de "${template.name}": "${childOption.trigger}"`);
+                 return {
+                   id: `${template.id}-opt-${childOption.trigger}`,
+                   trigger: childOption.trigger,
+                   response: childOption.response,
+                   tag: childOption.tag, // NOVO: Extrai a tag da ação aninhada
+                   type: 'text',
+                   enabled: true,
+                   delay: 500
+                 };
+               }
+            }
+          }
+        } catch(e) {}
       }
 
       // 2. Se nenhum template customizado combinou, usa keywords default
       const defaultKeywords = [
-        { trigger: 'horário|hora|quando|começa', response: 'O curso começa às 19h. Dúvidas?' },
-        { trigger: 'duração|tempo|quanto tempo|quanto demora', response: 'O curso tem 40 horas de duração.' },
-        { trigger: 'preço|custa|valor|quanto custa', response: 'Entre em contato conosco para saber o preço especial do seu plano.' },
-        { trigger: 'inscrição|matrícula|como faço', response: 'Para se inscrever, clique no link' },
-        { trigger: 'dúvida|duvida|problema|ajuda|help', response: 'Oi! Como posso te ajudar?' },
+        { trigger: 'horário, hora, quando, começa', response: 'O curso começa às 19h. Dúvidas?' },
+        { trigger: 'duração, tempo, quanto tempo, quanto demora', response: 'O curso tem 40 horas de duração.' },
+        { trigger: 'preço, custa, valor, quanto custa', response: 'Entre em contato conosco para saber o preço especial do seu plano.' },
+        { trigger: 'inscrição, matrícula, como faço', response: 'Para se inscrever, clique no link' },
+        { trigger: 'dúvida, problema, ajuda, help', response: 'Oi! Como posso te ajudar?' },
       ];
 
       for (const kw of defaultKeywords) {
-        const regex = new RegExp(kw.trigger, 'gi');
-        if (regex.test(message)) {
+        const triggerPhrases = kw.trigger.split(',').map(s => s.trim());
+        if (triggerPhrases.some(phrase => phrase.length > 0 && fuzzyMatchPhrase(message, phrase))) {
           console.log(`[AutoResponse] Match padrão encontrado: "${kw.trigger}"`);
           return {
             id: kw.trigger,
@@ -213,8 +417,23 @@ class AutoResponseService {
    * Habilita/desabilita autorresponse global
    */
   async toggleAutoResponse(enabled: boolean) {
-    // Você pode adicionar uma tabela de configuração no banco
+    this.isEnabled = enabled;
     console.log(`[AutoResponse] Autorresponse ${enabled ? 'ativado' : 'desativado'}`);
+  }
+  /**
+   * Registra uma mensagem manual do dono (para pausar o bot)
+   */
+  registerManualMessage(contactId: string) {
+    const now = Date.now();
+    const lastBot = this.lastBotResponseTime.get(contactId) || 0;
+
+    // Se o robô acabou de falar (nos últimos 3 segundos), não é intervenção manual
+    if (now - lastBot < 3000) {
+      return; 
+    }
+
+    console.log(`[AutoResponse] 👤 Intervenção manual detectada para ${contactId}. Bot pausado por 10 min.`);
+    this.lastManualMessageTime.set(contactId, now);
   }
 }
 

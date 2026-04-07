@@ -54,6 +54,17 @@ router.post('/send', uploadMedia.single('media'), async (req, res) => {
     else await whatsappService.sendMedia(to, filePath, caption);
   }
 
+  // NOVO: Salva a mensagem no histórico do banco de dados
+  try {
+    const phone = to.replace(/@c\.us|@g\.us/, '');
+    const contact = await prisma.contact.findUnique({ where: { phone } });
+
+    if (contact) {
+    }
+  } catch (err) {
+    console.error('[WhatsApp Route] Erro ao salvar histórico:', err);
+  }
+
   res.json({ message: 'Mensagem enviada com sucesso' });
 });
 

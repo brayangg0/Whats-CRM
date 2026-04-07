@@ -34,12 +34,12 @@ const server = http.createServer(app);
 
 // Socket.IO para comunicação em tempo real (QR Code, status WhatsApp)
 export const io = new SocketIO(server, {
-  cors: { origin: process.env.FRONTEND_URL || 'http://localhost:5173', credentials: true }
+  cors: { origin: '*', credentials: true } // Alterado para permitir ngrok/rede
 });
 
 // Middlewares
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
-app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173', credentials: true }));
+app.use(cors({ origin: '*', credentials: true })); // Alterado para permitir ngrok/rede
 app.use(morgan('dev'));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -64,6 +64,17 @@ app.use('/api/sequences',   sequenceRoutes);
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
+
+// Serve frontend em produção (Railway)
+if (process.env.NODE_ENV === 'production') {
+  const frontendDistPath = path.join(process.cwd(), '..', 'frontend', 'dist');
+  app.use(express.static(frontendDistPath));
+  // Qualquer rota que não seja /api serve o index.html do React
+  app.get('*', (_req, res) => {
+    res.sendFile(path.join(frontendDistPath, 'index.html'));
+  });
+  console.log(`[Server] Servindo frontend de: ${frontendDistPath}`);
+}
 
 // Error handler
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -97,6 +108,11 @@ async function bootstrap() {
     // Inicializa o scheduler de mensagens
     await schedulerService.initialize();
     console.log('[Scheduler] Agendador iniciado');
+
+    // Inicializa o serviço de autorrespostas (Bot) e timers de inatividade
+    const { autoResponseService } = await import('./services/autoresponse.service');
+    await autoResponseService.initialize();
+    console.log('[AutoResponse] Bot de atendimento iniciado');
 
     // Recarrega sequências agendadas
     await sequenceService.reloadSchedules();

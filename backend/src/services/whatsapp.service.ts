@@ -5,13 +5,13 @@ import fs from 'fs';
 import { prisma } from './database';
 
 // io será injetado após bootstrap para evitar dependência circular
-let ioRef: any = null;
+export let ioRef: any = null;
 export function setSocketIO(io: any) { ioRef = io; }
 
 class WhatsAppService {
   private client: Client | null = null;
   private isReady = false;
-  private sessionPath = path.join(process.cwd(), '.wwebjs_auth');
+  private sessionPath = process.env.SESSION_PATH || path.join(process.cwd(), '.wwebjs_auth');
 
   async initialize() {
     console.log('[WhatsApp] Inicializando cliente...');
@@ -30,7 +30,7 @@ class WhatsAppService {
           '--no-zygote',
           // Removido: '--single-process' é muito pesado
         ],
-        executablePath: undefined, // Usa Chrome do sistema se disponível
+        executablePath: process.env.CHROMIUM_PATH || undefined, // Em produção (Railway), use: CHROMIUM_PATH=/usr/bin/chromium
       },
       takeoverOnConflict: true,
       takeoverTimeoutMs: 0,
@@ -97,8 +97,8 @@ class WhatsAppService {
       }
     });
 
-    this.client.on('message', async (msg) => {
-      await this.handleIncomingMessage(msg);
+    this.client.on('message_create', async (msg) => {
+      await this.handleMessage(msg);
     });
 
     this.client.on('auth_failure', (msg) => {
@@ -124,17 +124,59 @@ class WhatsAppService {
     }
   }
 
-  private async handleIncomingMessage(msg: any) {
+  private async handleMessage(msg: any) {
     try {
-      const from = msg.from.replace('@c.us', '');
-      if (msg.from.includes('@g.us')) return; // ignora mensagens de grupos por enquanto
+      const message = await this.persistMessage(msg);
+      if (!message) return;
 
-      // Busca ou cria contato
-      let contact = await prisma.contact.findUnique({ where: { phone: from } });
+      const isFromMe = msg.fromMe;
+      const remoteJid = isFromMe ? msg.to : msg.from;
+      const phone = remoteJid.replace('@c.us', '').replace('@g.us', '');
+
+      // Se a mensagem for MINHA (enviada pelo dono do número em qualquer lugar), pausa o robô
+      if (isFromMe) {
+        const { autoResponseService } = await import('./autoresponse.service');
+        autoResponseService.registerManualMessage(message.contactId);
+        return; // Para o robô por aqui (não responde o que o dono mandou)
+      }
+
+      // Se a mensagem for do ALUNO, passa para o robô decidir se responde
+      const { autoResponseService } = await import('./autoresponse.service');
+      const messageBody = msg.body || (msg.hasMedia ? '[MEDIA]' : '');
+      
+      // FILTRO DE SEGURANÇA: Ignora mensagens que não devem disparar o robô
+      const isRevoked = msg.type === 'revoked' || msg.type === 'revoked_message';
+      const isSystem = msg.isSystemMessage || msg.type === 'gp2' || msg.type === 'notification_template';
+      const isEmpty = !messageBody || messageBody.trim().length === 0;
+      const isDeletedText = messageBody?.toLowerCase().includes('mensagem apagada') || messageBody?.toLowerCase().includes('message was deleted');
+
+      if (isRevoked || isSystem || isEmpty || isDeletedText) {
+        console.log(`[WhatsApp] ⊘ Evento de sistema ou mensagem vazia de ${phone}, ignorando automação.`);
+        return;
+      }
+
+      // A função processIncomingMessage agora lida com o log se isEnabled for false
+      autoResponseService.processIncomingMessage(message.contactId, phone, messageBody).catch(console.error);
+    } catch (err) {
+      console.error('[WhatsApp] Erro ao processar mensagem:', err);
+    }
+  }
+
+  private async persistMessage(msg: any) {
+    try {
+      const whatsappId = msg.id._serialized;
+      const existing = await prisma.message.findFirst({ where: { whatsappId } });
+      if (existing) return existing;
+
+      const isFromMe = msg.fromMe;
+      const remoteJid = isFromMe ? msg.to : msg.from;
+      const phone = remoteJid.replace('@c.us', '').replace('@g.us', '');
+
+      let contact = await prisma.contact.findUnique({ where: { phone } });
       if (!contact) {
         const waContact = await msg.getContact();
         contact = await prisma.contact.create({
-          data: { name: waContact.pushname || waContact.name || from, phone: from },
+          data: { name: waContact.pushname || waContact.name || phone, phone },
         });
       }
 
@@ -148,6 +190,7 @@ class WhatsAppService {
           const ext = media.mimetype.split('/')[1]?.split(';')[0] || 'bin';
           const filename = `${Date.now()}_${contact.id}.${ext}`;
           const dest = path.join(process.cwd(), 'uploads', 'media', filename);
+          if (!fs.existsSync(path.dirname(dest))) fs.mkdirSync(path.dirname(dest), { recursive: true });
           fs.writeFileSync(dest, Buffer.from(media.data, 'base64'));
           mediaPath = `/uploads/media/${filename}`;
         }
@@ -156,29 +199,24 @@ class WhatsAppService {
       const message = await prisma.message.create({
         data: {
           contactId: contact.id,
-          direction: 'inbound',
+          direction: isFromMe ? 'outbound' : 'inbound',
           type,
-          body: msg.body || null,
+          body: msg.body || (isMedia ? '[Mídia]' : ''),
           mediaPath,
-          whatsappId: msg.id._serialized,
+          whatsappId,
+          status: 'sent',
           isRgData: type === 'image' && (msg.body?.toLowerCase().includes('rg') || msg.body?.toLowerCase().includes('documento')),
         },
       });
 
-      // Se for imagem de RG, dispara OCR em background
-      if (message.isRgData && mediaPath) {
-        this.processRgDocument(message.id, mediaPath, contact.id).catch(console.error);
+      if (ioRef) {
+        ioRef.emit('message:received', { contactId: contact.id, message });
       }
 
-      // Processa autorresponse para mensagens de texto
-      if (type === 'text' && msg.body) {
-        const { autoResponseService } = await import('./autoresponse.service');
-        autoResponseService.processIncomingMessage(contact.id, from, msg.body).catch(console.error);
-      }
-
-      ioRef?.emit('message:received', { contactId: contact.id, message });
+      return message;
     } catch (err) {
-      console.error('[WhatsApp] Erro ao processar mensagem:', err);
+      console.error('[WhatsApp] Erro ao persistir mensagem:', err);
+      return null;
     }
   }
 
@@ -214,13 +252,14 @@ class WhatsAppService {
   async sendText(to: string, body: string): Promise<boolean> {
     if (!this.isReady || !this.client) throw new Error('WhatsApp não está conectado');
     const chatId = to.includes('@') ? to : `${to}@c.us`;
-    await this.client.sendMessage(chatId, body);
+    const msg = await this.client.sendMessage(chatId, body);
+    await this.persistMessage(msg);
     return true;
   }
 
   async sendMedia(to: string, filePath: string, caption?: string): Promise<boolean> {
     if (!this.isReady || !this.client) throw new Error('WhatsApp não está conectado');
-    
+
     // Verificar se arquivo existe
     if (!fs.existsSync(filePath)) {
       console.error(`[WhatsApp] ❌ Arquivo não encontrado: ${filePath}`);
@@ -257,7 +296,7 @@ class WhatsAppService {
 
   async sendMediaToGroup(groupId: string, filePath: string, caption?: string): Promise<boolean> {
     if (!this.isReady || !this.client) throw new Error('WhatsApp não está conectado');
-    
+
     // Verificar se arquivo existe
     if (!fs.existsSync(filePath)) {
       console.error(`[WhatsApp] ❌ Arquivo não encontrado: ${filePath}`);

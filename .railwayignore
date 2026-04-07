@@ -1,0 +1,21 @@
+# Ignorar arquivos desnecessários no Railway
+.git
+.gitignore
+*.md
+!README.md
+
+# Sessões locais do WhatsApp (serão recriadas com Volume)
+backend/.wwebjs_auth
+backend/.wwebjs_cache
+
+# Banco de dados local
+backend/*.db
+backend/*.db-journal
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db

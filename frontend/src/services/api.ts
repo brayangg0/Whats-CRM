@@ -109,6 +109,7 @@ export const restartWhatsApp = () => api.post('/whatsapp/restart').then((r) => r
 export const getAutoResponseStatus = () => api.get('/automation/autoresponse/status').then((r) => r.data);
 export const getAutoResponseTemplates = () => api.get('/automation/autoresponse/templates').then((r) => r.data);
 export const createAutoResponseTemplate = (data: any) => api.post('/automation/autoresponse/template', data).then((r) => r.data);
+export const updateAutoResponseTemplate = (id: string, data: any) => api.put(`/automation/autoresponse/template/${id}`, data).then((r) => r.data);
 export const deleteAutoResponseTemplate = (id: string) => api.delete(`/automation/autoresponse/template/${id}`).then((r) => r.data);
 
 // Automação - Campanhas Agendadas

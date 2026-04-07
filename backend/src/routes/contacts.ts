@@ -152,8 +152,22 @@ router.put('/:id', async (req, res) => {
 
 // DELETE /api/contacts/:id
 router.delete('/:id', async (req, res) => {
-  await prisma.contact.delete({ where: { id: req.params.id } });
-  res.status(204).send();
+  const { id } = req.params;
+
+  try {
+    // Usamos uma transação para garantir que tudo seja apagado corretamente
+    await prisma.$transaction([
+      prisma.message.deleteMany({ where: { contactId: id } }),
+      prisma.groupMember.deleteMany({ where: { contactId: id } }),
+      prisma.campaignSend.deleteMany({ where: { contactId: id } }),
+      prisma.student.deleteMany({ where: { contactId: id } }), // Garantia extra (embora o schema já tenha cascade)
+      prisma.contact.delete({ where: { id } })
+    ]);
+    res.status(204).send();
+  } catch (err) {
+    console.error('[Contacts Route] Erro ao deletar contato:', err);
+    res.status(500).json({ error: 'Erro ao remover contato e suas dependências' });
+  }
 });
 
 export default router;

@@ -1,4 +1,62 @@
-# 🚀 CRM WhatsApp - Sistema Completo de Automação
+# 🚀 Brayan Office — CRM WhatsApp
+
+> **Bot automático para gerenciar cursos, alunos e comunicação via WhatsApp**
+
+---
+
+## 📋 Histórico de Alterações (07/04/2026)
+
+Registro de todas as mudanças realizadas nesta sessão de desenvolvimento.
+
+### 1. 🔇 Desativação das Mensagens Automáticas do Robô
+
+**Arquivo:** `backend/src/services/autoresponse.service.ts`
+
+O robô estava enviando automaticamente mensagens para os alunos (menu de boas-vindas, respostas por palavras-chave e avisos de inatividade). As automações foram desativadas temporariamente conforme solicitado.
+
+**O que foi feito:**
+- Adicionada a flag `isEnabled = false` na classe `AutoResponseService`.
+- O método `processIncomingMessage` agora retorna imediatamente se `isEnabled` for `false`, sem enviar nenhuma mensagem.
+- O sistema de follow-up de inatividade (mensagem após 5 min de silêncio) também foi pausado.
+- O método `toggleAutoResponse(enabled)` foi implementado para permitir reativação futura.
+
+**Como reativar no futuro:**  
+Altere `private isEnabled = false;` para `private isEnabled = true;` no arquivo acima (linha ~74).
+
+---
+
+### 2. 🗑️ Correção do Botão de Exclusão de Contatos
+
+**Arquivo:** `frontend/src/pages/Contacts.tsx`
+
+O botão de lixeira (🗑️) na tela de Contatos não estava funcionando visualmente, pois dependia do `confirm()` nativo do browser, que pode ser bloqueado ou invisível em certos ambientes.
+
+**O que foi feito:**
+- Substituído o `confirm()` nativo por um **modal de confirmação próprio**.
+- O modal exibe o nome do contato a ser removido, com botões "Cancelar" e "Sim, remover".
+- Mostra estado de carregamento durante a exclusão (`Removendo...`).
+- Fecha automaticamente após a operação.
+
+---
+
+### 3. ✏️ Renomeação do Sistema para "Brayan Office"
+
+**Arquivos alterados:**
+- `frontend/index.html` — título da aba do browser
+- `frontend/src/components/Layout.tsx` — nome na barra lateral
+- `frontend/src/pages/Login.tsx` — nome na tela de login
+
+**O que foi feito:**
+
+| Local | Antes | Depois |
+|---|---|---|
+| Aba do navegador | `CRM WhatsApp - Treinamentos` | `Brayan Office` |
+| Sidebar (menu lateral) | `CRM WhatsApp` / `Treinamentos` | `Brayan Office` / `CRM WhatsApp` |
+| Tela de login | `CRM WhatsApp` / `Sistema de Treinamentos` | `Brayan Office` / `CRM WhatsApp` |
+
+---
+
+
 
 > **Bot automático para gerenciar cursos, alunos e comunicação via WhatsApp**
 

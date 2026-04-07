@@ -8,7 +8,7 @@ import {
   FileText, Calendar, Smartphone, Wifi, WifiOff, Menu, X, Zap, Send
 } from 'lucide-react';
 
-const socket = io({ path: '/socket.io' });
+export const socket = io({ path: '/socket.io' });
 
 const navItems = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
@@ -60,8 +60,8 @@ export default function Layout() {
         <div className="flex items-center justify-between p-4 border-b border-gray-700">
           {sidebarOpen && (
             <div>
-              <h1 className="font-bold text-lg text-whatsapp">CRM WhatsApp</h1>
-              <p className="text-xs text-gray-400">Treinamentos</p>
+              <h1 className="font-bold text-lg text-whatsapp">Brayan Office</h1>
+              <p className="text-xs text-gray-400">CRM WhatsApp</p>
             </div>
           )}
           <button onClick={() => setSidebarOpen(!sidebarOpen)} className="text-gray-400 hover:text-white">
@@ -70,11 +70,10 @@ export default function Layout() {
         </div>
 
         {/* WhatsApp status badge */}
-        <div className={`mx-3 my-2 flex items-center gap-2 px-3 py-2 rounded-lg text-xs ${
-          waStatus === 'connected' ? 'bg-green-900/50 text-green-400' :
-          waStatus === 'qr_ready' ? 'bg-yellow-900/50 text-yellow-400' :
-          'bg-red-900/50 text-red-400'
-        }`}>
+        <div className={`mx-3 my-2 flex items-center gap-2 px-3 py-2 rounded-lg text-xs ${waStatus === 'connected' ? 'bg-green-900/50 text-green-400' :
+            waStatus === 'qr_ready' ? 'bg-yellow-900/50 text-yellow-400' :
+              'bg-red-900/50 text-red-400'
+          }`}>
           {waStatus === 'connected' ? <Wifi size={14} /> : <WifiOff size={14} />}
           {sidebarOpen && (
             <span>{waStatus === 'connected' ? 'Conectado' : waStatus === 'qr_ready' ? 'Aguard. QR' : 'Desconectado'}</span>
@@ -85,8 +84,7 @@ export default function Layout() {
         <nav className="flex-1 py-4 space-y-1 px-2">
           {navItems.map(({ to, icon: Icon, label }) => (
             <NavLink key={to} to={to} className={({ isActive }) =>
-              `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
-                isActive ? 'bg-whatsapp text-white' : 'text-gray-400 hover:bg-gray-800 hover:text-white'
+              `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${isActive ? 'bg-whatsapp text-white' : 'text-gray-400 hover:bg-gray-800 hover:text-white'
               }`
             }>
               <Icon size={18} className="shrink-0" />

@@ -49,6 +49,29 @@ router.post('/autoresponse/template', async (req, res) => {
   }
 });
 
+// PUT /api/automation/autoresponse/template/:id
+router.put('/autoresponse/template/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, type, body, mediaPath, variables } = req.body;
+
+    const template = await prisma.messageTemplate.update({
+      where: { id },
+      data: {
+        ...(name && { name }),
+        ...(type && { type }),
+        ...(body !== undefined && { body: body || null }),
+        ...(mediaPath !== undefined && { mediaPath: mediaPath || null }),
+        ...(variables !== undefined && { variables: JSON.stringify(variables) })
+      }
+    });
+
+    res.json(template);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/automation/autoresponse/templates
 router.get('/autoresponse/templates', async (_req, res) => {
   try {
