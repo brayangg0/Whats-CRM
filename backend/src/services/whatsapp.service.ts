@@ -2,7 +2,35 @@ import { Client, LocalAuth, MessageMedia, Chat, GroupChat } from 'whatsapp-web.j
 import qrcode from 'qrcode';
 import path from 'path';
 import fs from 'fs';
+import { execSync } from 'child_process';
 import { prisma } from './database';
+
+// Detecta o caminho real do Chromium (compatível com nix/Railway)
+function detectChromiumPath(): string | undefined {
+  const envPath = process.env.CHROMIUM_PATH;
+  if (envPath && envPath.trim() !== '') {
+    if (fs.existsSync(envPath)) {
+      console.log(`[WhatsApp] ✅ Chromium via CHROMIUM_PATH: ${envPath}`);
+      return envPath;
+    }
+    console.warn(`[WhatsApp] ⚠️  CHROMIUM_PATH=${envPath} não existe. Tentando auto-detectar...`);
+  }
+  try {
+    const found = execSync(
+      'which chromium 2>/dev/null || which chromium-browser 2>/dev/null || which google-chrome-stable 2>/dev/null || which google-chrome 2>/dev/null',
+      { encoding: 'utf8', timeout: 5000 }
+    ).trim().split('\n')[0];
+    if (found && fs.existsSync(found)) {
+      console.log(`[WhatsApp] 🔍 Chromium auto-detectado em: ${found}`);
+      return found;
+    }
+  } catch {
+    // não encontrou via which
+  }
+  console.warn('[WhatsApp] ⚠️  Chromium não encontrado — usando padrão do Puppeteer');
+  return undefined;
+}
+
 
 // io será injetado após bootstrap para evitar dependência circular
 export let ioRef: any = null;
@@ -31,7 +59,7 @@ class WhatsAppService {
           '--no-zygote',
           // Removido: '--single-process' é muito pesado
         ],
-        executablePath: process.env.CHROMIUM_PATH || undefined, // Em produção (Railway), use: CHROMIUM_PATH=/usr/bin/chromium
+        executablePath: detectChromiumPath(),
       },
       takeoverOnConflict: true,
       takeoverTimeoutMs: 0,
