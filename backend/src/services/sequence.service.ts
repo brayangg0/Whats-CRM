@@ -25,10 +25,10 @@ class SequenceService {
 
     const delayMs = sequence.scheduledAt.getTime() - Date.now();
     if (delayMs <= 0) {
-      // ✅ FIX: Executa em background para não bloquear a HTTP request de criação
+      // Executa em background para não bloquear a HTTP request de criação
       console.log(`[Sequence] ⚡ Sequência ${sequenceId} em execução imediata (background)`);
       setImmediate(() => {
-        this.sendSequenceNow(sequenceId).catch((err) =>
+        this.sendSequenceNow(sequenceId).catch((err: any) =>
           console.error(`[Sequence] ❌ Erro ao enviar sequência ${sequenceId}:`, err.message)
         );
       });
@@ -45,10 +45,10 @@ class SequenceService {
   }
 
   /**
-   * Envia uma sequência NOW (sem esperar)
+   * Envia uma sequência NOW (sem esperar agendamento)
    * @param force - Se true, reenvia mesmo que já esteja completed/running (ex: botão "Enviar Agora")
    */
-  async sendSequenceNow(sequenceId: string, force = false): Promise<void> {
+  async sendSequenceNow(sequenceId: string, force = false): Promise<{ sent: number; failed: number; errors: string[] }> {
     const sequence = await prisma.messageSequence.findUnique({
       where: { id: sequenceId },
       include: { messages: { orderBy: { order: 'asc' } } },
@@ -56,7 +56,7 @@ class SequenceService {
 
     if (!sequence) throw new Error('Sequência não encontrada');
 
-    // ✅ FIX: force=true reseta o status e permite reenvio explícito
+    // force=true reseta o status e permite reenvio explícito
     if (force) {
       await prisma.messageSequence.update({
         where: { id: sequenceId },
@@ -64,7 +64,7 @@ class SequenceService {
       });
     } else if (sequence.status === 'running' || sequence.status === 'completed') {
       console.log(`[Sequence] ⚠️ Sequência ${sequenceId} já foi executada (use force=true para reenviar)`);
-      return;
+      return { sent: 0, failed: 0, errors: ['Sequência já foi executada'] };
     }
 
     const { isReady } = whatsappService.getStatus();
@@ -82,10 +82,11 @@ class SequenceService {
       data: { status: 'running', startedAt: new Date() },
     });
 
-    console.log(`[Sequence] 🚀 Iniciando sequência ${sequenceId} com ${targets.length} destinatários`);
+    console.log(`[Sequence] 🚀 Iniciando sequência ${sequenceId} com ${targets.length} destinatário(s) e ${sequence.messages.length} mensagem(ns)`);
 
-    let sent = 0,
-      failed = 0;
+    let sent = 0;
+    let failed = 0;
+    const errors: string[] = [];
 
     for (const target of targets) {
       try {
@@ -93,7 +94,7 @@ class SequenceService {
         for (let i = 0; i < sequence.messages.length; i++) {
           const message = sequence.messages[i];
 
-          // ✅ FIX: delayBefore antes de enviar ESTA mensagem (exceto a primeira)
+          // delayBefore: espera ANTES de enviar esta mensagem (exceto a primeira)
           if (i > 0 && message.delayBefore > 0) {
             await new Promise((r) => setTimeout(r, message.delayBefore));
           }
@@ -104,20 +105,24 @@ class SequenceService {
             mediaPath: message.mediaPath || undefined,
             caption: message.caption || undefined,
           };
-          await this.sendMessage(target, formattedMessage);
 
-          // ✅ FIX: usa messageDelay entre mensagens (não delayBefore)
+          await this.sendMessage(target, formattedMessage);
+          console.log(`[Sequence] ✉️ Mensagem ${i + 1}/${sequence.messages.length} enviada para ${target.id}`);
+
+          // messageDelay: intervalo ENTRE mensagens (aguarda antes da próxima)
           if (i < sequence.messages.length - 1 && message.messageDelay > 0) {
             await new Promise((r) => setTimeout(r, message.messageDelay));
           }
         }
         sent++;
       } catch (err: any) {
-        console.error(`[Sequence] ❌ Falha ao enviar sequência para ${target.id}:`, err.message);
+        const errMsg = `${target.id}: ${err.message}`;
+        console.error(`[Sequence] ❌ Falha para ${target.id}:`, err.message);
+        errors.push(errMsg);
         failed++;
       }
 
-      // Esperar 2 segundos entre destinatários (evitar bloqueio)
+      // Esperar 2 segundos entre destinatários (evitar bloqueio do WhatsApp)
       if (targets.indexOf(target) < targets.length - 1) {
         await new Promise((r) => setTimeout(r, 2000));
       }
@@ -135,10 +140,15 @@ class SequenceService {
     });
 
     console.log(`[Sequence] ✅ Sequência ${sequenceId} concluída: ${sent} enviadas, ${failed} falhadas`);
+    if (errors.length > 0) {
+      console.error('[Sequence] Erros:', errors.join(' | '));
+    }
+
+    return { sent, failed, errors };
   }
 
   /**
-   * Enviar uma mensagem individual
+   * Enviar uma mensagem individual para um destinatário
    */
   private async sendMessage(
     target: { id: string; isGroup: boolean },
@@ -149,12 +159,12 @@ class SequenceService {
         throw new Error('Mensagem de texto sem conteúdo');
       }
       if (target.isGroup) {
-        await whatsappService.sendToGroup(target.id, message.body!);
+        await whatsappService.sendToGroup(target.id, message.body);
       } else {
-        await whatsappService.sendText(target.id, message.body!);
+        await whatsappService.sendText(target.id, message.body);
       }
     } else {
-      // ✅ FIX: Resolução robusta do caminho do arquivo de mídia
+      // Resolução robusta do caminho do arquivo de mídia
       const filePath = this.resolveMediaPath(message.mediaPath!);
       if (!filePath) {
         throw new Error(`Arquivo de mídia não encontrado: ${message.mediaPath}`);
@@ -169,62 +179,76 @@ class SequenceService {
   }
 
   /**
-   * ✅ FIX: Resolve o caminho real do arquivo de mídia testando múltiplas estratégias
+   * Resolve o caminho real do arquivo de mídia testando múltiplas estratégias.
+   * Aceita paths no formato '/uploads/media/filename.ext' (URL-style) ou absolutos.
    */
   private resolveMediaPath(mediaPath: string): string | null {
     if (!mediaPath) return null;
 
+    const baseUploads = process.env.UPLOADS_PATH || path.join(process.cwd(), 'uploads');
+    // Remove leading slash para poder usar path.join corretamente
+    const cleanPath = mediaPath.startsWith('/') ? mediaPath.slice(1) : mediaPath;
+    const filename = path.basename(mediaPath);
+
     const candidates = [
-      // 1. Caminho absoluto direto
+      // 1. Caminho absoluto direto (caso já seja absoluto)
       mediaPath,
-      // 2. Relativo ao cwd (ex: uploads/media/file.ext ou ../data/uploads/media/file.ext)
-      path.join(process.cwd(), mediaPath),
-      // 3. Relativo ao UPLOADS_PATH
+      // 2. Relativo ao cwd: /uploads/media/file -> cwd/uploads/media/file
+      path.join(process.cwd(), cleanPath),
+      // 3. Relativo ao UPLOADS_PATH base: /uploads/media/file -> UPLOADS_PATH/media/file
       process.env.UPLOADS_PATH
-        ? path.join(process.env.UPLOADS_PATH, mediaPath)
+        ? path.join(baseUploads, 'media', filename)
         : null,
-      // 4. Apenas o nome do arquivo dentro do UPLOADS_PATH/media
+      // 4. Apenas filename dentro de uploads/media (fallback)
+      path.join(process.cwd(), 'uploads', 'media', filename),
+      // 5. Relativo ao UPLOADS_PATH diretamente (sem subpasta)
       process.env.UPLOADS_PATH
-        ? path.join(process.env.UPLOADS_PATH, 'media', path.basename(mediaPath))
+        ? path.join(process.env.UPLOADS_PATH, cleanPath)
         : null,
-      // 5. Dentro da pasta uploads local
-      path.join(process.cwd(), 'uploads', 'media', path.basename(mediaPath)),
     ].filter(Boolean) as string[];
 
-    for (const candidate of candidates) {
+    // Remover duplicatas
+    const unique = [...new Set(candidates)];
+
+    console.log(`[Sequence] 🔍 Resolvendo mídia: "${mediaPath}" — tentando ${unique.length} caminho(s)...`);
+    for (const candidate of unique) {
       if (fs.existsSync(candidate)) {
         console.log(`[Sequence] 📁 Arquivo encontrado em: ${candidate}`);
         return candidate;
       }
     }
 
-    console.error(`[Sequence] ❌ Arquivo não encontrado. Tentativas: ${candidates.join(', ')}`);
+    console.error(`[Sequence] ❌ Arquivo não encontrado após tentar:\n  ${unique.join('\n  ')}`);
     return null;
   }
 
   /**
-   * Buscar destinatários baseado no tipo
+   * Buscar destinatários baseado no tipo de alvo
    */
   private async getTargets(sequence: any): Promise<{ id: string; isGroup: boolean }[]> {
     const targets: { id: string; isGroup: boolean }[] = [];
 
     if (sequence.targetType === 'contact' && sequence.targetId) {
-      // Um único contato
       const contact = await prisma.contact.findUnique({ where: { id: sequence.targetId } });
-      if (contact) targets.push({ id: contact.phone, isGroup: false });
+      if (contact) {
+        targets.push({ id: contact.phone, isGroup: false });
+      } else {
+        console.warn(`[Sequence] ⚠️ Contato ${sequence.targetId} não encontrado`);
+      }
     } else if (sequence.targetType === 'group' && sequence.targetId) {
-      // Um único grupo
       const group = await prisma.whatsAppGroup.findUnique({ where: { id: sequence.targetId } });
-      if (group) targets.push({ id: group.groupId, isGroup: true });
+      if (group) {
+        targets.push({ id: group.groupId, isGroup: true });
+      } else {
+        console.warn(`[Sequence] ⚠️ Grupo ${sequence.targetId} não encontrado`);
+      }
     } else if (sequence.targetType === 'all') {
-      // Todos os contatos e grupos
       const contacts = await prisma.contact.findMany({ where: { status: 'active' } });
       contacts.forEach((c) => targets.push({ id: c.phone, isGroup: false }));
 
       const groups = await prisma.whatsAppGroup.findMany({ where: { active: true } });
       groups.forEach((g) => targets.push({ id: g.groupId, isGroup: true }));
     } else if (sequence.targetType === 'tagged') {
-      // Contatos com tags específicas
       let tags: string[] = [];
       try { tags = JSON.parse(sequence.targetTags); } catch { tags = []; }
 
@@ -238,7 +262,6 @@ class SequenceService {
         contacts.forEach((c) => targets.push({ id: c.phone, isGroup: false }));
       }
     } else if (sequence.targetType === 'all_students') {
-      // Todos os alunos
       const contacts = await prisma.contact.findMany({
         where: {
           status: 'active',
@@ -248,6 +271,7 @@ class SequenceService {
       contacts.forEach((c) => targets.push({ id: c.phone, isGroup: false }));
     }
 
+    console.log(`[Sequence] 🎯 ${targets.length} destinatário(s) encontrado(s) para targetType=${sequence.targetType}`);
     return targets;
   }
 

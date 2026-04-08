@@ -83,9 +83,9 @@ router.post('/', uploadMedia.any(), async (req, res) => {
         const match = file.fieldname.match(/^file_(\d+)$/);
         if (match) {
           const msgIndex = parseInt(match[1]);
-          // Converter caminho absoluto para relativo (uploads/media/uuid.ext)
-          const relativePath = path.relative(process.cwd(), file.path);
-          filesMap.set(msgIndex, relativePath);
+          // Salvar sempre como URL-style: /uploads/media/filename.ext
+          const normalizedPath = `/uploads/media/${path.basename(file.path)}`;
+          filesMap.set(msgIndex, normalizedPath);
         }
       }
     }
@@ -189,8 +189,15 @@ router.delete('/:id', async (req, res) => {
 router.post('/:id/send', async (req, res) => {
   try {
     // force=true: permite reenviar mesmo que já esteja completed/cancelled
-    await sequenceService.sendSequenceNow(req.params.id, true);
-    res.json({ message: 'Sequência enviada com sucesso' });
+    const result = await sequenceService.sendSequenceNow(req.params.id, true);
+    res.json({
+      message: result.failed === 0
+        ? 'Sequência enviada com sucesso!'
+        : `Concluída: ${result.sent} enviadas, ${result.failed} falhadas`,
+      sent: result.sent,
+      failed: result.failed,
+      errors: result.errors,
+    });
   } catch (err: any) {
     console.error('[Sequences] ❌ Erro ao enviar:', err.message);
     res.status(500).json({ error: err.message });
@@ -228,7 +235,7 @@ router.post('/:id/message', uploadMedia.single('media'), async (req, res) => {
         type,
         body,
         caption,
-        mediaPath: req.file ? req.file.path : undefined,
+        mediaPath: req.file ? `/uploads/media/${path.basename(req.file.path)}` : undefined,
         delayBefore: 2000,
       },
     });
@@ -250,7 +257,7 @@ router.put('/:id/message/:msgId', uploadMedia.single('media'), async (req, res) 
     if (body !== undefined) data.body = body;
     if (caption !== undefined) data.caption = caption;
     if (delayBefore !== undefined) data.delayBefore = delayBefore;
-    if (req.file) data.mediaPath = req.file.path;
+    if (req.file) data.mediaPath = `/uploads/media/${path.basename(req.file.path)}`;
 
     const message = await prisma.sequenceMessage.update({
       where: { id: req.params.msgId },
